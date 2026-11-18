@@ -1,0 +1,23 @@
+{
+  "version": "bp-assumption-v4",
+  "status": "用户讨论基础上的规则与偏好假设，未核验具体赛事协议",
+  "maps": ["Ancient", "Anubis", "Cache", "Dust2", "Inferno", "Mirage", "Nuke"],
+  "first_actor": "unknown_equal_mixture",
+  "first_ban_rule": "lowest_usage_unless_already_banned",
+  "first_ban_prior": "global_map_rate_90d",
+  "first_ban_kappa": 2.0,
+  "first_ban_min_expected": 2.0,
+  "BO1": ["ban", "ban", "ban", "ban", "ban", "ban"],
+  "BO3": ["ban", "ban", "pick", "pick", "ban", "ban"],
+  "BO5": ["ban", "ban", "pick", "pick", "pick", "pick"],
+  "temperature": 1.0,
+  "weights": {
+    "ban_avoidance": 4.0,
+    "ban_opponent_usage": 2.0,
+    "ban_matchup_risk": 1.0,
+    "pick_usage": 3.0,
+    "pick_matchup": 1.0,
+    "pick_recent_form": 0.4,
+    "pick_trend": 1.0
+  }
+}
