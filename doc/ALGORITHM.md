@@ -9,18 +9,24 @@
 ```text
 configs/bp_rules.json         七图池、赛制动作序列、BP 权重与温度
 data/                         比赛 CSV 与积分快照（.gitignore）
+data/major/singapore2026/     Major 种子表（stage1/2/3.txt，每行一队，从高到低）
 doc/ALGORITHM.md              本文件：算法与验证
+doc/MAJOR.md                  Major 瑞士轮模拟与 Pick'Em 作业（规则、实现、验证）
 doc/DESIGN.md                 设计总览与取舍
 doc/README.md                 项目入口
 reports/bp/                   生产输出（每对阵一个目录）
+reports/major/                Major 输出（_pairwise 缓存、每阶段一个目录）
 scripts/
   data_io.py                  CSV 读取、队名规范化、镜像合并、输入哈希
   map_preference_features.py  出场统计（近 30 / 前 30 / 21 天半衰期）
   features.py                 赛前状态与逐图特征（原 v5_features.py）
   series_probability.py       强度模型 + 系列赛数学 + 集合范围
   predict_bp.py               生产入口：BP 枚举 + 赛制胜率
+  major_sim.py                Major 瑞士轮蒙特卡洛 + Pick'Em 最优作业
   evaluate.py                 前向折 OOF 评估（地图级 + 系列赛级）
-  test_bp.py                  正确性测试
+  test/
+    test_bp.py                正确性测试
+    test_major.py             瑞士轮与竞猜优化的正确性测试
 ```
 
 ---
@@ -342,7 +348,7 @@ veto 未知时不假装知道会打哪几张图，而是枚举全部合法集合
 | 分档引擎族 | 9 种分档方案 × 2 种用法全部测过；序数间隔 + 档宽随水平增长最优 |
 | 对称护栏代价 | 裁剪 1.3%、LogLoss 变化 0.0000 |
 | 系列赛独立性 | BO3 打满率 0.407（实测）vs 0.432（模型） |
-| 互补性 / 路径合法性 / 归一 / 早停 | `scripts/test_bp.py` 全部 PASS（含首ban 证据门槛的新断言） |
+| 互补性 / 路径合法性 / 归一 / 早停 | `scripts/test/test_bp.py` 全部 PASS（含首ban 证据门槛的新断言） |
 | 两引擎一致性 | `predict_bp.py` 与 `series_probability.py` 输出逐位相同 |
 | 首ban 规则改动的影响 | top-12 两两 66 组 BO3：平均 \|Δ\| = 0.28pp、最大 2.1pp、0 组超过 3pp |
 | 首ban 证据分布 | 324 队中仅 46 队（14%）的 `expected ≥ 2`；其余改为均分，不再假装确定 |
@@ -387,7 +393,7 @@ python scripts/series_probability.py FURIA Spirit --json
 
 # 验证
 python scripts/evaluate.py     # 地图级 + 系列赛级 OOF 对照
-python scripts/test_bp.py      # 枚举与概率正确性
+python scripts/test/test_bp.py      # 枚举与概率正确性
 ```
 
 输出：`reports/bp/队A__队B__日期/{prediction.json, report.md, BO*_all_paths.csv}`。

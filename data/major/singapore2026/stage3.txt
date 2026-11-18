@@ -1,0 +1,17 @@
+# PGL Major Singapore 2026（2026-11-24 ~ 12-13，32 队三阶段瑞士轮 + 8 队单败季后赛；种子 = Valve 全球 VRS 2026-11-02） · Stage 3 种子表
+# 每行一支队伍，按官方种子从高到低（第 1 行 = 1 号种子）。
+# '#' 开头为注释，空行忽略；也可写 '1. MOUZ' 这种带编号的形式。
+# 改完直接跑：python scripts/major_sim.py --stage data/major/singapore2026/stage3.txt
+# 想看更稳/更准的解，加 --sims 400000 --threshold 5,6,7
+# 种子 1-8 = 直邀队（按赛前全球 VRS 序），已填好。
+# 种子 9-16 = Stage 2 的 8 支晋级队，按 Stage 2 最终种子序；
+#   留空（只写 8 行）时脚本不会自动猜——请在该阶段开打前把 16 行填满。
+
+MOUZ
+Vitality
+FURIA
+Aurora
+Spirit
+BETBOOM
+Falcons
+Legacy

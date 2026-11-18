@@ -1,9 +1,13 @@
-"""BP概率和规则正确性检查：python scripts/test_bp.py。"""
+"""BP概率和规则正确性检查：python scripts/test/test_bp.py。"""
 import json,math,copy,itertools
+import sys
 from pathlib import Path
+
+root=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(root/'scripts'))
+
 from predict_bp import validate_config,enumerate_paths,summarize_paths,series_distribution,series_details,action_probabilities
 
-root=Path(__file__).resolve().parents[1]
 config=json.loads((root/'configs/bp_rules.json').read_text(encoding='utf-8'))
 validate_config(config)
 profile={m:dict(avoidance=0,usage=1/7,smoothed_recent_win_signal=0,

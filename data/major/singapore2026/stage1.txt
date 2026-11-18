@@ -1,0 +1,23 @@
+# PGL Major Singapore 2026（2026-11-24 ~ 12-13，32 队三阶段瑞士轮 + 8 队单败季后赛；种子 = Valve 全球 VRS 2026-11-02） · Stage 1 种子表（16 队全填）
+# 每行一支队伍，按官方种子从高到低（第 1 行 = 1 号种子）。
+# '#' 开头为注释，空行忽略；也可写 '1. MOUZ' 这种带编号的形式。
+# 改完直接跑：python scripts/major_sim.py --stage data/major/singapore2026/stage1.txt
+# 想看更稳/更准的解，加 --sims 400000 --threshold 5,6,7
+# 16 队齐 = 直接可跑；替换成你自己的种子序即可。
+
+Ninjas in Pyjamas
+PARIVISION
+HEROIC
+FaZe
+Liquid
+Eternal Fire
+100 Thieves
+9z
+M80
+DENDELE
+Imperial
+Wildcard
+BC.Game
+FlyQuest
+Chinggis Warriors
+Lynn Vision

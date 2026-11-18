@@ -1,9 +1,10 @@
 # 当前项目入口
 
 计算**任意两队的 BO1 / BO3 / BO5 胜率**，地图感知：先算七图胜率，再用 BP 规则枚举出图集合，
-按集合积成系列赛概率。
+按集合积成系列赛概率。在此之上还能**模拟 Major 瑞士轮并给游戏内竞猜作业**。
 
 - 算法、公式、参数、验证数字：[ALGORITHM.md](ALGORITHM.md)
+- Major 瑞士轮模拟 + Pick'Em 作业：[MAJOR.md](MAJOR.md)
 - 设计取舍与历史：[DESIGN.md](DESIGN.md)
 - 已停用的旧方案：`archive/v5/`
 
@@ -24,11 +25,22 @@ python scripts/series_probability.py FURIA Spirit
 python scripts/series_probability.py FURIA Falcons --maps Ancient,Dust2,Mirage
 ```
 
+## Major 竞猜
+
+```powershell
+# 在 data/major/singapore2026/stage1.txt 里按种子从高到低写 16 支队，然后：
+python scripts/major_sim.py --stage data/major/singapore2026/stage1.txt
+```
+
+输出 `reports/major/<种子表名>/`：每队 3-0/3-1/3-2/0-3 概率、10 格最优作业、每格边际命中率、
+与前缀对照。规则、赛制、验证见 [MAJOR.md](MAJOR.md)。
+
 ## 验证
 
 ```powershell
 python scripts/evaluate.py     # 前向折 OOF：地图级 + 系列赛级，tier / points 对照
-python scripts/test_bp.py      # 枚举合法性、归一、互补、解析真值
+python scripts/test/test_bp.py      # 枚举合法性、归一、互补、解析真值
+python scripts/test/test_major.py   # 瑞士轮配对/BO1-BO3 判据/结构分布/竞猜优化
 ```
 
 ## 常用参数
