@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data_io import load_maps, load_rankings, ordinal  # noqa: E402
 from features import build_training_features  # noqa: E402
 from series_probability import (RAIL, TIER_SLOPE, TIER_WIDTH, build_tiers,  # noqa: E402
-                                fit_strength, strength_row, tier_second)
+                                fit_strength, strength_row, tier_features)
 
 FOLDS = [.40, .55, .70, .85]
 
@@ -45,21 +45,21 @@ def main():
 
     tiers, fallback = build_tiers(rankings, medians, TIER_WIDTH, TIER_SLOPE)
     print(f"数据: {len(rows)} 张地图, {dates[0]} .. {dates[-1]}, 折 = {cuts}")
-    print(f"分档: 宽度 {TIER_WIDTH:.0f} + {TIER_SLOPE:.0%}×积分, "
-          f"共 {max(tiers.values()) + 1} 档\n")
+    print(f"两榜分别分档: 宽度 {TIER_WIDTH:.0f} + {TIER_SLOPE:.0%}×积分, "
+          + ", ".join(f"{p} 共 {max(t.values()) + 1} 档" for p, t in tiers.items()) + "\n")
 
     table = {}
     for engine in ("tier", "points"):
-        second = tier_second(tiers, fallback) if engine == "tier" else None
+        ratings = tier_features(tiers, fallback) if engine == "tier" else None
         pred, rec = [], []
         for start, end in zip(cuts[:-1], cuts[1:]):
             tr = [r for r in rows if r["date"] < start]
             fu = [r for r in rows if start <= r["date"] < end]
-            st = fit_strength(tr, second)
+            st = fit_strength(tr, ratings)
             w, c = np.array(st["weights"]), st["c"]
             for r in fu:
-                col2 = second(dict(a=r["a"], b=r["b"])) if second else r["x4"][1]
-                z = float(strength_row(r["x4"], col2) @ w - c * r["avoid"])
+                rank_values = ratings(r) if ratings else None
+                z = float(strength_row(r["x4"], rank_values) @ w - c * r["avoid"])
                 r["_p"] = float(min(max(1 / (1 + np.exp(-z)), RAIL), 1 - RAIL))
             pred += [r["_p"] for r in fu]
             rec += fu
@@ -84,7 +84,8 @@ def main():
             series=(np.array(sys_y), np.array(sys_p)),
             rows=rec, p=p,
             same_idx=[i for i, r in enumerate(rec)
-                      if tiers.get(r["a"], fallback) == tiers.get(r["b"], fallback)])
+                      if all(tiers[p].get(r["a"], fallback[p]) == tiers[p].get(r["b"], fallback[p])
+                             for p in tiers)])
 
     print("=== 地图级（3 折合并 OOF）===")
     print(f"  {'引擎':8s}{'LogLoss':>10s}{'Brier':>9s}{'Acc':>9s}{'≥1600':>9s}{'≥1700':>9s}")
@@ -97,11 +98,14 @@ def main():
         ys, ps = v["series"]
         print(f"  {engine:8s}{len(ys):6d}{ll_of(ys, ps):10.4f}{np.mean((ps >= .5) == ys):9.4f}")
 
-    print("\n=== 同档对局（tier 引擎）的地图差异来源 ===")
+    print("\n=== 两榜均同档对局（tier 引擎）的地图差异来源 ===")
     same_p = table["tier"]["p"][table["tier"]["same_idx"]]
-    print(f"  同档样本 {len(same_p)} 张地图，平均 |p-0.5| = {np.mean(np.abs(same_p - .5)):.3f}，"
-          f"p 范围 [{same_p.min():.3f}, {same_p.max():.3f}]")
-    print("  同档时 p 的差异只来自回合净胜残差；veto 决定打哪几张图。")
+    if len(same_p):
+        print(f"  同档样本 {len(same_p)} 张地图，平均 |p-0.5| = {np.mean(np.abs(same_p - .5)):.3f}，"
+              f"p 范围 [{same_p.min():.3f}, {same_p.max():.3f}]")
+    else:
+        print("  没有两榜均同档的样本。")
+    print("  两榜均同档时，p 的差异来自回合净胜残差与回避项；veto 决定打哪些图。")
 
 
 if __name__ == "__main__":

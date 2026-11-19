@@ -1,4 +1,4 @@
-"""V5固定的赛前特征与时间更新规则。保留现有模型计算方式。"""
+"""赛前状态与特征：HLTV、Valve 均使用 log1p 分差作为基础积分特征。"""
 from collections import defaultdict,Counter
 from datetime import date
 import numpy as np
@@ -34,7 +34,7 @@ def predict_features(model,a,b,map_name,as_of):
     A=summarize(model['state'].get(a,empty),map_name,as_of)
     B=summarize(model['state'].get(b,empty),map_name,as_of)
     x=[np.log1p(point(a,'hltv'))-np.log1p(point(b,'hltv')),
-       (point(a,'valve')-point(b,'valve'))/400,(elo.get(a,1500)-elo.get(b,1500))/400]
+       np.log1p(point(a,'valve'))-np.log1p(point(b,'valve')),(elo.get(a,1500)-elo.get(b,1500))/400]
     x += [int(a not in ranks[p])-int(b not in ranks[p]) for p in ['hltv','valve']]
     x += [(A['dynamic']-B['dynamic'])/400,A['margin']-B['margin'],A['counterpick']-B['counterpick']]
     return x,A['avoidance']-B['avoidance'],A,B

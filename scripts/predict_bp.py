@@ -12,8 +12,9 @@ import numpy as np
 from scipy.special import expit
 from features import build_training_features,predict_features
 from data_io import load_maps,load_rankings,key
-from series_probability import (RAIL,TIER_SLOPE,TIER_WIDTH,binomial,build_profiles,build_tiers,
-                                fit_strength,series_win,strength_row,tier_second)
+from series_probability import (RAIL,RATING_PROVIDERS,STRENGTH_VERSION,TIER_SLOPE,TIER_WIDTH,
+                                binomial,build_profiles,build_tiers,
+                                fit_strength,series_win,strength_row,tier_features)
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -197,21 +198,22 @@ def prepare(a,b,as_of,config,engine='tier',tier_width=TIER_WIDTH,tier_slope=TIER
     known={m for s in model['state'].values() for m in s['maps']}
     if not set(config['maps'])<=known:raise ValueError('地图池包含数据中未出现的地图')
     tiers,fallback=build_tiers(rankings,medians,tier_width,tier_slope)
-    second=tier_second(tiers,fallback) if engine=='tier' else None
-    strength=fit_strength(rows,second)
+    if engine not in ('tier','points'):raise ValueError('engine 必须为 tier 或 points')
+    ratings=tier_features(tiers,fallback) if engine=='tier' else None
+    strength=fit_strength(rows,ratings)
     w,c=strength['weights'],strength['c']
-    col2=second(dict(a=a,b=b)) if second else None
+    rank_values=ratings(dict(a=a,b=b)) if ratings else None
     map_probs={}
     for m in config['maps']:
         x,av,A,B=predict_features(model,a,b,m,as_of)
-        raw_p=float(expit(strength_row(x,col2 if second else x[1])@np.array(w)-c*av))
+        raw_p=float(expit(strength_row(x,rank_values)@np.array(w)-c*av))
         map_probs[m]=float(min(max(raw_p,RAIL),1-RAIL))
     profiles=build_profiles(a,b,as_of,model,rows,config['maps'])
-    provenance=dict(engine=engine,
-        strength=dict(weights=dict(zip(['hltv','second','margin'],w)),avoidance_c=c,rail=RAIL,
+    provenance=dict(engine=engine,strength_version=STRENGTH_VERSION,
+        strength=dict(weights=dict(zip(['hltv','valve','margin'],w)),avoidance_c=c,rail=RAIL,
                       tier=dict(width=tier_width,slope=tier_slope) if engine=='tier' else None,
-                      tier_a=tiers.get(a,fallback) if engine=='tier' else None,
-                      tier_b=tiers.get(b,fallback) if engine=='tier' else None),
+                      tier_a={p:tiers[p].get(a,fallback[p]) for p in RATING_PROVIDERS} if engine=='tier' else None,
+                      tier_b={p:tiers[p].get(b,fallback[p]) for p in RATING_PROVIDERS} if engine=='tier' else None),
         n_maps=len(rows),trained_through=model['trained_through'],
         missing_ranking=sorted({t for t in (a,b) for p in ('hltv','valve') if t not in rankings[p]}),
         source_hashes=manifest+rank_manifest)
@@ -235,7 +237,7 @@ def main():
     parser.add_argument('--date',default='2026-11-18');parser.add_argument('--top',type=int,default=10)
     parser.add_argument('--config',default=str(ROOT/'configs/bp_rules.json'))
     parser.add_argument('--out',default='',help='输出根目录，默认 reports/bp（用于对照实验时写临时目录）')
-    parser.add_argument('--engine',choices=['tier','points'],default='tier',help='tier=分档差（默认）；points=原始积分差')
+    parser.add_argument('--engine',choices=['tier','points'],default='tier',help='tier=两榜均分档（默认）；points=两榜均取 log1p 分差')
     parser.add_argument('--tier-width',type=float,default=TIER_WIDTH)
     parser.add_argument('--tier-slope',type=float,default=TIER_SLOPE)
     args=parser.parse_args()
@@ -252,10 +254,10 @@ def main():
     result=dict(team_a=name_a,team_b=name_b,as_of=args.date,first_actor='unknown_50_50',
         maps=config['maps'],map_win_probabilities_a=map_probs,profiles=dict(a=profiles[0],b=profiles[1]),config=config,
         provenance=provenance,first_ban=first_ban_audit(profiles,config),
-        warning='单图胜率来自3特征强度模型（4参数，OOF LogLoss 0.6167），已对尾部做[0.15,0.85]护栏；'
-                '但预测>0.9的样本实测仅0.868，单图尾部仍偏乐观，BO5会把该偏误放大约1.5倍，'
-                '故BO5点估计偏高，应优先参考同赛制的集合范围。BP动作概率为手工偏好情景，未经真实Veto标签训练。'
-                '七图池已与Liquipedia核对，赛制协议仍需按赛事确认。',formats={})
+        warning='单图胜率来自3特征强度模型（4参数），使用[0.15,0.85]逐图护栏。'
+                'tier 对 HLTV/Valve 均分档，points 对两榜均取 log1p 分差。'
+                'BO5 会放大单图概率误差；地图集合范围只表示地图选择的敏感性，不是置信区间。'
+                'BP动作概率为手工偏好情景，未经真实Veto标签训练，赛制协议仍需按赛事确认。',formats={})
     formats=['BO1','BO3','BO5'] if args.format=='all' else ['BO1','BO3'] if args.format=='both' else [args.format]
     for fmt in formats:
         paths=enumerate_paths(fmt,profiles,map_probs,config);summary=summarize_paths(paths,map_probs,args.top)
@@ -278,8 +280,11 @@ def main():
     (out/'prediction.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     lines=[f'# {name_a} 对 {name_b}：BP与整场胜率情景','',result['warning'],'',
         '全部情况先手未知，A先/B先各50%。BO1交替六ban；BO3 ban-ban-pick-pick-ban-ban；BO5 ban-ban-pick-pick-pick-pick。均以剩余地图决胜。',
-        '逐图胜率=3特征强度模型：logit = 0.070·Δlog(HLTV) + 1.173·ΔValve/400 + 2.299·Δ回合净胜残差 − c·Δ回避，再截断到[0.15,0.85]。'
-        '唯一有验证价值的地图差异来源是回合净胜残差（OOF 0.6167）；动态地图、被针对代理、缺分标记、整体状态均已实测无增益，不参与计算。',
+        f"胜率引擎：{args.engine}，模型版本：{STRENGTH_VERSION}。"
+        + ('HLTV 与 Valve 分别分档，各取档差/5。' if args.engine=='tier'
+           else 'HLTV 与 Valve 均取 log(1+积分) 之差。')
+        + f"拟合权重：{provenance['strength']['weights']}；回避系数：{provenance['strength']['avoidance_c']:.4f}。"
+        + '逐图 logit 为两榜特征加权和 + 回合净胜残差项 − 回避项，再截断到[0.15,0.85]。',
         '偏好基于实际出场而非真实pick记录；ban考虑自身回避/对手常用/对阵风险，pick考虑自身常用/近期趋势/平滑胜率及强度模型对阵胜率。softmax只在剩余图中分配动作概率。',
         '双方首ban取原始地图池中"加权出场占比相对全局出图率最低"的图（先验不是均匀 1/7），并列则均分；该图若已被对手ban，则恢复原综合评分。若按全局出图率该图本该出场不足 2 次，则判为证据不足，改为在剩余图上均分。',
         first_ban_sentence(result['first_ban'],name_a,name_b),

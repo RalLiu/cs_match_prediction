@@ -1,10 +1,10 @@
 """任意两队的 BO1/BO3/BO5 胜率（地图感知）。
 
-算法（全部来自前几轮的实测结论，见 _diag/）：
+算法（详细说明见 doc/PROJECT.md）：
   1) 队伍强度与地图差异分开建模：
-         p_m = sigmoid( w_hltv*Δlog(HLTV) + w_valve*ΔValve/400
+         p_m = sigmoid( w_hltv*HLTV特征差 + w_valve*Valve特征差
                         + w_margin*(A在m图的回合残差 − B在m图的回合残差) − c*(A回避−B回避) )
-     3 个权重 + 1 个回避系数，在前向折上 OOF 最优配置 LogLoss≈0.6167。
+     tier：两榜均分档；points：两榜均使用 log1p 分差。3 个权重 + 1 个回避系数。
      唯一有验证价值的地图差异来源是 round_margin（回合净胜残差）；
      dynamic_map / counterpick 等已证明无增益，不进入胜率。
   2) 系列赛胜率 = 对"会被打到的地图集合"求和：
@@ -50,46 +50,50 @@ RAIL = 0.15
 TIER_WIDTH = 80.0     # 档宽基数（积分）
 TIER_SLOPE = 0.06     # 档宽随积分增长的比例：宽度 = TIER_WIDTH + TIER_SLOPE * 积分
 TIER_DIV = 5.0        # 档差除以该值，仅用于数值缩放
+STRENGTH_VERSION = "dual-ranking-v1"
+RATING_PROVIDERS = ("hltv", "valve")
 
 
 def build_tiers(rankings, medians, width=TIER_WIDTH, slope=TIER_SLOPE):
-    """积分 -> 档位序号（0 = 最高档）。档宽随水平增长，顶档更宽。
+    """HLTV、Valve 各自按本榜最高分独立分档，缺榜用本榜中位数对应档位。"""
+    if not math.isfinite(width) or width <= 0 or not math.isfinite(slope) or slope < 0:
+        raise ValueError("档宽须为有限正数，档宽斜率须为有限非负数")
+    tiers, fallback = {}, {}
+    for provider in RATING_PROVIDERS:
+        pts = rankings[provider]
+        hi = max(pts.values())
 
-    依据：同一分差在顶区兑现率更低（顶区 +0.4 以上实测 0.647，低区 0.745），
-    因此给高分端更宽的档；OOF 上该方案优于原始分差（0.6162 vs 0.6167），
-    且在顶区子集与准确率上同样更好。缺榜队伍用中位数对应的档位。
-    """
-    pts = dict(rankings["valve"])
-    hi = max(pts.values())
+        def index(points):
+            steps, x = 0, float(points)
+            while x < hi:
+                x += width + slope * x
+                steps += 1
+            return steps
 
-    def index(points):
-        steps, x = 0, float(points)
-        while x < hi:
-            x += width + slope * x
-            steps += 1
-        return steps
-
-    return ({t: index(p) for t, p in pts.items()}, index(medians["valve"]))
-
-
-def tier_second(tiers, fallback):
-    """构造"第二列特征"：分档差。"""
-    def second(r):
-        ta = tiers.get(r["a"], fallback)
-        tb = tiers.get(r["b"], fallback)
-        return (ta - tb) / TIER_DIV
-    return second
+        tiers[provider] = {t: index(p) for t, p in pts.items()}
+        fallback[provider] = index(medians[provider])
+    return tiers, fallback
 
 
-def strength_row(x4, second=None):
-    """3 维设计向量：[HLTV 差, 第二列(分档差 或 Valve 差/400), 回合残差]。"""
-    return np.array([x4[0], second if second is not None else x4[1], x4[6]])
+def tier_features(tiers, fallback):
+    """同时替换 HLTV、Valve 两列为各自的档差。"""
+    def ratings(r):
+        return tuple((tiers[p].get(r["a"], fallback[p])
+                      - tiers[p].get(r["b"], fallback[p])) / TIER_DIV
+                     for p in RATING_PROVIDERS)
+    return ratings
+
+
+def strength_row(x4, ratings=None):
+    """[HLTV 特征差, Valve 特征差, 回合残差]；默认前两列均为 log1p 分差。"""
+    hltv, valve = ratings if ratings is not None else x4[:2]
+    return np.array([hltv, valve, x4[6]])
 
 
 # ---------------------------------------------------------------- 训练（3+1 参数）
-def fit_strength(rows, second=None):
-    """second(record) -> 第二列特征值；None 表示用 Valve 差/400（points 口径）。"""
-    x = np.array([strength_row(r["x4"], second(r) if second else None) for r in rows])
+def fit_strength(rows, ratings=None):
+    """ratings(record) 同时给出两榜特征；None 使用基础特征中的双 log1p 分差。"""
+    x = np.array([strength_row(r["x4"], ratings(r) if ratings else None) for r in rows])
     scale = np.maximum(np.sqrt(np.mean(x * x, axis=0)), 1e-6)
     xn = x / scale
     y = np.array([r["y"] for r in rows])
@@ -111,7 +115,7 @@ def fit_strength(rows, second=None):
 
     res = minimize(obj, np.r_[np.zeros(3), .3], jac=jac, method="L-BFGS-B",
                    bounds=[(None, None)] * 3 + [(0, 1)])
-    return dict(weights=(res.x[:-1] / scale).tolist(), c=float(res.x[-1]), second=second)
+    return dict(weights=(res.x[:-1] / scale).tolist(), c=float(res.x[-1]))
 
 
 # ---------------------------------------------------------------- 系列赛数学
@@ -199,16 +203,18 @@ def predict_pair(team_a, team_b, as_of, pool=POOL, use_rule_veto=True, detail=Fa
         raise ValueError(f"日期须晚于训练截止日 {current['trained_through']}")
 
     tiers, fallback = build_tiers(rankings, medians, tier_width, tier_slope)
-    second = tier_second(tiers, fallback) if engine == "tier" else None
-    model = fit_strength(rows, second)
+    if engine not in ("tier", "points"):
+        raise ValueError("engine 必须为 tier 或 points")
+    ratings = tier_features(tiers, fallback) if engine == "tier" else None
+    model = fit_strength(rows, ratings)
     w, c = model["weights"], model["c"]
 
     map_p = {}
     missing = []
     for m in pool:
         x, avoid, A, B = predict_features(current, a, b, m, as_of)
-        col2 = second(dict(a=a, b=b)) if second else x[1]
-        z = float(strength_row(x, col2) @ np.array(w) - c * avoid)
+        rank_values = ratings(dict(a=a, b=b)) if ratings else None
+        z = float(strength_row(x, rank_values) @ np.array(w) - c * avoid)
         raw = expit(z)
         map_p[m] = float(min(max(raw, rail), 1 - rail)) if rail else raw
         for t in (a, b):
@@ -217,13 +223,15 @@ def predict_pair(team_a, team_b, as_of, pool=POOL, use_rule_veto=True, detail=Fa
                     missing.append(t)
 
     result = dict(team_a=known[a], team_b=known[b], as_of=as_of,
-                  strength_model=dict(engine=engine,
-                                      weights=dict(zip(["hltv", "second", "margin"], w)),
+                  strength_model=dict(engine=engine, version=STRENGTH_VERSION,
+                                      weights=dict(zip(["hltv", "valve", "margin"], w)),
                                       avoidance_c=c,
                                       tier=dict(width=tier_width, slope=tier_slope)
                                       if engine == "tier" else None,
-                                      tier_a=tiers.get(a, fallback) if engine == "tier" else None,
-                                      tier_b=tiers.get(b, fallback) if engine == "tier" else None),
+                                      tier_a={p: tiers[p].get(a, fallback[p]) for p in RATING_PROVIDERS}
+                                      if engine == "tier" else None,
+                                      tier_b={p: tiers[p].get(b, fallback[p]) for p in RATING_PROVIDERS}
+                                      if engine == "tier" else None),
                   map_win_probabilities={m: map_p[m] for m in pool},
                   missing_ranking=sorted(set(missing)),
                   formats={})
@@ -289,7 +297,7 @@ def main() -> None:
     ap.add_argument("team_b")
     ap.add_argument("--date", default="2026-11-18")
     ap.add_argument("--engine", choices=["tier", "points"], default="tier",
-                    help="tier=分档差（默认）；points=原始积分差")
+                    help="tier=两榜均分档（默认）；points=两榜均取 log1p 分差")
     ap.add_argument("--tier-width", type=float, default=TIER_WIDTH)
     ap.add_argument("--tier-slope", type=float, default=TIER_SLOPE)
     ap.add_argument("--no-veto", action="store_true", help="不跑规则 veto，只给集合范围")
@@ -307,14 +315,15 @@ def main() -> None:
     A, B = r["team_a"], r["team_b"]
     sm = r["strength_model"]
     print(f"\n{A} vs {B}   as of {r['as_of']}   引擎={sm['engine']}")
-    print(f"强度模型: hltv={sm['weights']['hltv']:+.4f}  second={sm['weights']['second']:+.4f}  "
+    print(f"强度模型: hltv={sm['weights']['hltv']:+.4f}  valve={sm['weights']['valve']:+.4f}  "
           f"margin={sm['weights']['margin']:+.4f}  c={sm['avoidance_c']:.3f}")
     if sm.get("tier") is not None:
-        print(f"分档: 宽度={sm['tier']['width']:.0f}+{sm['tier']['slope']:.0%}×积分  "
-              f"{A}=第{sm['tier_a']}档  {B}=第{sm['tier_b']}档  "
-              f"档差={sm['tier_a'] - sm['tier_b']:+d}")
+        print(f"分档: 两榜分别使用宽度={sm['tier']['width']:.0f}+{sm['tier']['slope']:.0%}×积分")
+        for provider in RATING_PROVIDERS:
+            ta, tb = sm['tier_a'][provider], sm['tier_b'][provider]
+            print(f"  {provider}: {A}=第{ta}档  {B}=第{tb}档  档差={ta - tb:+d}")
     if r["missing_ranking"]:
-        print(f"注意：以下队伍缺积分榜，用中位数对应的档位，置信度低 -> {r['missing_ranking']}")
+        print(f"注意：以下队伍缺积分榜，使用对应榜单中位数回退 -> {r['missing_ranking']}")
     print(f"逐图 {A} 胜率: " + "  ".join(f"{m}={v:.3f}" for m, v in r["map_win_probabilities"].items()))
     print(f"地图间极差: {max(r['map_win_probabilities'].values()) - min(r['map_win_probabilities'].values()):.3f}")
     print()

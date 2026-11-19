@@ -64,6 +64,31 @@ def t_match_formats_and_structure():
     assert list(got.values()) == [6000, 9000, 9000, 9000, 9000, 6000], got
 
 
+def t_round_pairings_use_pre_round_buchholz():
+    """第 2 轮上半区先打，不能改变下半区已按轮前 Buchholz 确定的配对。"""
+    trace = []
+
+    class LoggedRow(list):
+        def __init__(self, team, values):
+            super().__init__(values)
+            self.team = team
+
+        def __getitem__(self, opponent):
+            trace.append((self.team, int(opponent)))
+            return super().__getitem__(opponent)
+
+    class LoggedMatrix:
+        def tolist(self):
+            return [LoggedRow(i, [float(i < j) for j in range(16)]) for i in range(16)]
+
+    ids = np.arange(16, dtype=np.int16)[None, :]
+    matrix = LoggedMatrix()
+    ms.simulate(ids, matrix, matrix, seed=23)
+    assert trace[:8] == ms.INITIAL_PAIRS
+    assert trace[8:16] == [(0, 7), (1, 6), (2, 5), (3, 4),
+                          (8, 15), (9, 14), (10, 13), (11, 12)], trace[8:16]
+
+
 def t_bo3_only_on_advance_or_elimination():
     """把 BO1 概率全设成 0.5、BO3 设成极端值，检验 BO3 只用在该用的场次。"""
     rng = np.random.default_rng(1)
@@ -143,6 +168,28 @@ def t_distribution_and_thresholds():
     assert abs(sum(st["probability"].values()) - 1) < 1e-9
     assert st["at_least"]["5"] >= st["at_least"]["6"] >= st["at_least"]["7"]
     assert abs(st["expected"] - sum(int(k) * v for k, v in st["probability"].items())) < 1e-9
+
+
+def t_scores_match_frequency_weighted_set_intersections():
+    """逐条计分应与参考项目的组合去重、频数加权、集合交集计分完全等价。"""
+    from collections import Counter
+
+    rng = np.random.default_rng(29)
+    base = np.repeat(np.arange(6, dtype=np.int8), ms.STRUCTURAL_COUNTS)
+    rows = np.array([rng.permutation(base) for _ in range(200)])
+    code = np.repeat(rows, rng.integers(1, 8, size=len(rows)), axis=0)
+    labels = np.array([1, 1] + [2] * 6 + [3, 3] + [0] * 6, np.int8)
+    chosen = [set(np.flatnonzero(labels == slot)) for slot in (1, 2, 3)]
+    hist = np.zeros(11, np.int64)
+    for row, count in Counter(map(tuple, code.tolist())).items():
+        buckets = [{i for i, outcome in enumerate(row) if outcome in accepted}
+                   for accepted in ({0}, {1, 2}, {5})]
+        hits = sum(len(picks & actual) for picks, actual in zip(chosen, buckets))
+        hist[hits] += count
+    stats = ms.PickEm(code).stats(labels, [5, 6, 7])
+    assert [stats["distribution"][str(i)] for i in range(11)] == hist.tolist()
+    for k in (5, 6, 7):
+        assert stats["at_least"][str(k)] == hist[k:].sum() / len(code)
 
 
 def t_optimizer_beats_expected_only():

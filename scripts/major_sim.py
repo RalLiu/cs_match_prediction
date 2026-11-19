@@ -28,7 +28,7 @@
   2) 在模拟出的**联合分布**上直接求解"使 P(答对 ≥ K 个) 最大"的 10 个格子，
      并给出每格边际命中率、与"最大化期望答对数"和"按种子硬填"的对照。
 
-用法见 --help 或 doc/MAJOR.md。
+用法见 --help 或 doc/PROJECT.md。
 """
 from __future__ import annotations
 
@@ -52,8 +52,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from data_io import key, load_maps, load_rankings  # noqa: E402
 from features import build_training_features, predict_features  # noqa: E402
 from predict_bp import enumerate_paths, summarize_paths  # noqa: E402
-from series_probability import (RAIL, TIER_SLOPE, TIER_WIDTH, build_profiles,  # noqa: E402
-                                build_tiers, fit_strength, strength_row, tier_second)
+from series_probability import (RAIL, STRENGTH_VERSION, TIER_SLOPE, TIER_WIDTH, build_profiles,  # noqa: E402
+                                build_tiers, fit_strength, strength_row, tier_features)
 
 CONFIG = ROOT / "configs/bp_rules.json"
 TEMPLATE_DIR = ROOT / "data/major/singapore2026"
@@ -153,13 +153,16 @@ class Pairwise:
         if as_of <= self.model["trained_through"]:
             raise ValueError(f"日期须晚于训练截止日 {self.model['trained_through']}")
         self.tiers, self.fallback = build_tiers(self.rankings, self.medians, tier_width, tier_slope)
-        self.second = tier_second(self.tiers, self.fallback) if engine == "tier" else None
-        self.strength = fit_strength(self.rows, self.second)
+        if engine not in ("tier", "points"):
+            raise ValueError("engine 必须为 tier 或 points")
+        self.ratings = tier_features(self.tiers, self.fallback) if engine == "tier" else None
+        self.strength = fit_strength(self.rows, self.ratings)
         self.w, self.c = self.strength["weights"], self.strength["c"]
         self.cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
         self.pool = self.cfg["maps"]
         self.fingerprint = hashlib.sha256(json.dumps(dict(
             as_of=as_of, engine=engine, rail=rail, width=tier_width, slope=tier_slope,
+            strength_version=STRENGTH_VERSION,
             data=[m["sha256"] for m in manifest + rank_manifest],
             bp=hashlib.sha256(CONFIG.read_bytes()).hexdigest()), sort_keys=True).encode()).hexdigest()[:16]
         self.cache_dir = cache_dir or (ROOT / "reports/major/_pairwise")
@@ -187,7 +190,8 @@ class Pairwise:
             return
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_path.write_text(json.dumps(dict(
-            fingerprint=self.fingerprint, as_of=self.as_of, engine=self.engine, rail=self.rail,
+            fingerprint=self.fingerprint, strength_version=STRENGTH_VERSION,
+            as_of=self.as_of, engine=self.engine, rail=self.rail,
             probs={f"{a}|{b}": v for (a, b), v in sorted(self._probs.items())}), ensure_ascii=False),
             encoding="utf-8")
 
@@ -201,11 +205,11 @@ class Pairwise:
     # ---------------------------------------------------- 单对
     def map_probs(self, a: str, b: str) -> dict[str, float]:
         a, b = key(a), key(b)          # 允许传显示名
-        col2 = self.second(dict(a=a, b=b)) if self.second else None
+        rank_values = self.ratings(dict(a=a, b=b)) if self.ratings else None
         out = {}
         for m in self.pool:
             x, av, _, _ = predict_features(self.model, a, b, m, self.as_of)
-            z = float(strength_row(x, col2 if self.second else x[1]) @ np.array(self.w) - self.c * av)
+            z = float(strength_row(x, rank_values) @ np.array(self.w) - self.c * av)
             raw = expit(z)
             out[m] = float(min(max(raw, self.rail), 1 - self.rail)) if self.rail else float(raw)
         return out
@@ -279,6 +283,40 @@ def _matchings_without_rematch(order: list[int], mask: list[int]) -> list[tuple[
     return best if best is not None else _greedy_pairs(order, mask)
 
 
+def _round_pairs(w: list[int], l: list[int], mask: list[int], round_no: int
+                 ) -> tuple[list[tuple[int, int]], int, int]:
+    """使用轮前战绩一次确定整轮配对，不让本轮结果影响其他组的 Buchholz。"""
+    groups: dict[tuple[int, int], list[int]] = {}
+    for t in range(N_TEAMS):
+        if w[t] < 3 and l[t] < 3:
+            groups.setdefault((w[t], l[t]), []).append(t)
+    matches: list[tuple[int, int]] = []
+    fallback = greedy_fixes = 0
+    # 与参考实现一致：先打高战绩组；全部配对均在本轮任何比赛开始前确定。
+    for record in sorted(groups, reverse=True):
+        members = groups[record]
+        dif = {t: sum(w[o] - l[o] for o in _MASK_BITS[mask[t]]) for t in members}
+        order = sorted(members, key=lambda t: (-dif[t], t))
+        if round_no <= 3 or len(order) != 6:
+            pairs = _greedy_pairs(order, mask)
+            if any((mask[i] >> j) & 1 for i, j in pairs):
+                greedy_fixes += 1
+                pairs = _matchings_without_rematch(order, mask)
+        else:
+            pairs = None
+            for row_pairs in PRIORITY_ROWS:
+                if all(not (mask[order[p]] >> order[q]) & 1 for p, q in row_pairs):
+                    pairs = [(order[p], order[q]) for p, q in row_pairs]
+                    break
+            if pairs is None:
+                fallback += 1
+                best = min(PRIORITY_ROWS,
+                           key=lambda rp: sum((mask[order[p]] >> order[q]) & 1 for p, q in rp))
+                pairs = [(order[p], order[q]) for p, q in best]
+        matches.extend(pairs)
+    return matches, fallback, greedy_fixes
+
+
 def simulate(ids: np.ndarray, p_bo1: np.ndarray, p_bo3: np.ndarray, seed: int = 0,
              all_bo3: bool = False) -> dict:
     """按 Valve 规则跑 n 次完整 16 队瑞士轮。
@@ -329,37 +367,11 @@ def simulate(ids: np.ndarray, p_bo1: np.ndarray, p_bo3: np.ndarray, seed: int = 
             play(i, j)
 
         for round_no in (2, 3, 4, 5):
-            groups: dict[tuple[int, int], list[int]] = {}
-            for t in range(N_TEAMS):
-                if w[t] >= 3 or l[t] >= 3:
-                    continue
-                groups.setdefault((w[t], l[t]), []).append(t)
-            for members in groups.values():
-                if len(members) < 2:
-                    continue
-                dif = {t: sum(w[o] - l[o] for o in bits[mask[t]]) for t in members}
-                order = sorted(members, key=lambda t: (-dif[t], t))
-                if round_no <= 3 or len(order) != 6:
-                    # 第 2/3 轮：组内最高种子 vs 最低的未交手种子
-                    pairs = _greedy_pairs(order, mask)
-                    if any((mask[i] >> j) & 1 for i, j in pairs):
-                        # 贪心撞车但换一种配对可以完全避开重赛（规则要求 if possible）
-                        tally[3] += 1
-                        pairs = _matchings_without_rematch(order, mask)
-                else:
-                    # 第 4/5 轮：15 行优先级表取第一条不重赛的行
-                    pairs = None
-                    for row_pairs in PRIORITY_ROWS:
-                        if all(not (mask[order[p]] >> order[q]) & 1 for p, q in row_pairs):
-                            pairs = [(order[p], order[q]) for p, q in row_pairs]
-                            break
-                    if pairs is None:
-                        fallback += 1
-                        best = min(PRIORITY_ROWS,
-                                   key=lambda rp: sum((mask[order[p]] >> order[q]) & 1 for p, q in rp))
-                        pairs = [(order[p], order[q]) for p, q in best]
-                for i, j in pairs:
-                    play(i, j)
+            pairs, round_fallback, greedy_fixes = _round_pairs(w, l, mask, round_no)
+            fallback += round_fallback
+            tally[3] += greedy_fixes
+            for i, j in pairs:
+                play(i, j)
 
         for t in range(N_TEAMS):
             wins[s, t] = w[t]
@@ -723,8 +735,11 @@ def stage_report(pw: Pairwise, teams: list[str], sim: dict, pick: PickEm, search
         L.append(f"| ≥{k} | {np.quantile(v, .05):.1%} | {np.median(v):.1%} | "
                  f"{np.quantile(v, .95):.1%} | {v.max():.1%} | **{rec:.1%}** | "
                  f"{float((v <= rec).mean()):.0%} 分位 |")
-    L += ["", f"同一目标下候选之间只差几个百分点时属于抽样噪声（本次 {sims:,} 次模拟，"
-              f"单点通过率标准误约 {math.sqrt(.35 * .65 / sims):.2%}），不必纠结换哪一格。", ""]
+    max_se = max(math.sqrt(sol["probability"] * (1 - sol["probability"]) / n)
+                 for sol in solves.values())
+    L += ["", f"本次 {sims:,} 次模拟，各推荐填法通过率的蒙特卡洛标准误最大约 {max_se:.2%}。"
+              "这只衡量固定填法的随机抽样波动，不包含模型误差与搜索选择偏差；"
+              "比较两份填法应检查同批模拟中是否通过的逐次差值，不能把几个百分点一概当作噪声。", ""]
 
     k_main = max(thresholds)
     hold = holdout_check(pick, k_main, rng=random.Random(seed + 11))
@@ -742,9 +757,9 @@ def stage_report(pw: Pairwise, teams: list[str], sim: dict, pick: PickEm, search
           f"**② 选择偏差对照**：在 600 个随机作业里挑「样本内最好」的那个，它在另一半样本上从 "
           f"{hold['random_best_in']:.1%} 变成 {hold['random_best_oos']:.1%}"
           f"（样本外 − 样本内 = {(hold['random_best_oos'] - hold['random_best_in']) * 100:+.1f}pp）。"
-          "这就是「在同一样本上挑最好」的平均虚高幅度。", "",
+          "这是一组随机候选筛选的样本内外差异，不能视为选择偏差的平均值。", "",
           f"**③ 若错误地把 10 格当独立**（用各格边际做 Poisson-binomial）会得到 {naive:.1%}，"
-          f"与真实的 {solves[k_main]['full']['at_least'][str(k_main)]:.1%} 相差 "
+          f"与完整模拟统计的 {solves[k_main]['full']['at_least'][str(k_main)]:.1%} 相差 "
           f"{abs(naive - solves[k_main]['full']['at_least'][str(k_main)]) * 100:.1f}pp ——"
           "这就是忽略联合（槽位互斥、3-0 队填进晋级格不得分）的代价。", ""]
 
@@ -768,7 +783,8 @@ def stage_report(pw: Pairwise, teams: list[str], sim: dict, pick: PickEm, search
 
     payload = dict(
         teams=teams, sims=sims, seed=seed, as_of=pw.as_of, engine=pw.engine, rail=pw.rail,
-        fingerprint=pw.fingerprint, trained_through=pw.model["trained_through"],
+        fingerprint=pw.fingerprint, strength_version=STRENGTH_VERSION,
+        trained_through=pw.model["trained_through"],
         structure=check_structure(code), fallback=sim["fallback"],
         bo1_matches=sim["bo1_matches"], bo3_matches=sim["bo3_matches"],
         all_bo3=sim.get("all_bo3", False),
@@ -1019,6 +1035,7 @@ def major_report(pw: Pairwise, res: dict, sims: int, seed: int, thresholds: list
         else "晋级战与淘汰战 BO3，其余 BO1"), ""]
     md = "\n".join(L) + "\n"
     payload = dict(sims=sims, seed=seed, engine=pw.engine, rail=pw.rail,
+                   strength_version=STRENGTH_VERSION,
                    stage3_all_bo3=res["sims"][2].get("all_bo3", False),
                    paths=[p.as_posix() for p in res["paths"]],
                    reach={pw.names[t]: dict(
@@ -1052,7 +1069,8 @@ def main() -> None:
                     help="全 BO3：--stage 时作用于当前阶段；--major 时仅作用于 Stage 3")
     ap.add_argument("--threshold", default="6", help="通过线（答对几个算过），默认 6，即十中六")
     ap.add_argument("--as-of", default="2026-11-24", help="预测日期，默认 2026-11-24（Major 开赛日）")
-    ap.add_argument("--engine", choices=["tier", "points"], default="tier")
+    ap.add_argument("--engine", choices=["tier", "points"], default="tier",
+                    help="tier=两榜均分档；points=两榜均取 log1p 分差")
     ap.add_argument("--rail", type=float, default=RAIL, help=f"对称概率护栏，默认 {RAIL}")
     ap.add_argument("--seed", type=int, default=20261124, help="蒙特卡洛随机种子")
     ap.add_argument("--out", type=Path, default=None, help="输出目录，默认 reports/major/<种子表名>")
