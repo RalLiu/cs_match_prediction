@@ -148,7 +148,9 @@ class Pairwise:
         t0 = time.time()
         self.obs, self.names, manifest, _, _ = load_maps()
         self.rankings, self.medians, rank_manifest = load_rankings()
-        self.rows, self.model = build_training_features(self.obs, self.rankings, self.medians)
+        self.rows, self.model = build_training_features(self.obs, self.rankings, self.medians,
+                                                       engine=engine, tier_width=tier_width,
+                                                       tier_slope=tier_slope)
         self.model.update(names=self.names, trained_through=self.rows[-1]["date"])
         if as_of <= self.model["trained_through"]:
             raise ValueError(f"日期须晚于训练截止日 {self.model['trained_through']}")

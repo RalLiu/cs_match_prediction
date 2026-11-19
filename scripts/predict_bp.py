@@ -5,13 +5,13 @@
 """
 from pathlib import Path
 from collections import defaultdict
-from datetime import date
 from functools import lru_cache
 import argparse,csv,hashlib,itertools,json,math,re
 import numpy as np
 from scipy.special import expit
 from features import build_training_features,predict_features
 from data_io import load_maps,load_rankings,key
+from history_weights import MAP_HALF_LIFE_MATCHES
 from series_probability import (RAIL,RATING_PROVIDERS,STRENGTH_VERSION,TIER_SLOPE,TIER_WIDTH,
                                 binomial,build_profiles,build_tiers,
                                 fit_strength,series_win,strength_row,tier_features)
@@ -52,7 +52,7 @@ FIRST_BAN_MIN_EXPECTED=2.0   # 采信门槛：按全局出图率，该图"应该
 def first_ban_analysis(own,config,remaining=None):
     """首ban 的依据与证据强度。
 
-    先验不用均匀 1/7，而用近 90 天的全局出图率（Anubis 9.4% / Dust2 18.3%）：
+    先验不用均匀 1/7，而用最近约 500 张历史地图的全局出图率：
         share(m) = (加权出场 + kappa*全局率(m)) / (加权总质量 + kappa)
     并给出 expected = 质量 * 全局率(m)：若正常打这张图"应该见到的次数"。
     expected < min_expected 时，零出场更可能是环境原因，不足以判定为ban。
@@ -61,7 +61,7 @@ def first_ban_analysis(own,config,remaining=None):
     remaining=list(pool if remaining is None else remaining)
     kappa=float(config.get('first_ban_kappa',FIRST_BAN_KAPPA))
     min_expected=float(config.get('first_ban_min_expected',FIRST_BAN_MIN_EXPECTED))
-    prior=config.get('first_ban_prior','global_map_rate_90d')
+    prior=config.get('first_ban_prior','global_map_rate_last500')
     shares={};evidence={}
     for m in pool:
         e=own[m]
@@ -69,7 +69,7 @@ def first_ban_analysis(own,config,remaining=None):
         rate=e.get('global_rate')
         if prior=='uniform' or cnt is None or mass is None:
             # 旧口径：均匀 1/7 先验、无证据门槛。保留以便回溯与对照。
-            shares[m]=e.get('time_weighted_usage_probability',e['usage'])
+            shares[m]=e.get('count_weighted_usage_probability',e.get('time_weighted_usage_probability',e['usage']))
             evidence[m]=None
             continue
         rate=1.0/n if rate is None else rate
@@ -111,7 +111,7 @@ def first_ban_sentence(audit,name_a,name_b):
             continue
         head=f"{name} 首ban {x['lowest_map']}"
         if ev:
-            head+=(f"（该图 21 天加权出场 {ev['decayed_count']}、有效样本量 {ev['decayed_mass']}；"
+            head+=(f"（该图按已打地图场数加权出场 {ev['decayed_count']}、有效样本量 {ev['decayed_mass']}；"
                    f"按全局出图率 {ev['global_rate']:.1%} 本该出场 {ev['expected']} 次）")
         if x['decision']=='fallback_composite':
             head+="，该图已被对手ban，回落综合评分"
@@ -191,7 +191,8 @@ def prepare(a,b,as_of,config,engine='tier',tier_width=TIER_WIDTH,tier_slope=TIER
     observations,names,manifest,raw,quarantine=load_maps()
     rankings,medians,rank_manifest=load_rankings()
     if a==b or a not in names or b not in names:raise ValueError('需要两个不同的已知队伍')
-    rows,model=build_training_features(observations,rankings,medians)
+    rows,model=build_training_features(observations,rankings,medians,engine=engine,
+        tier_width=tier_width,tier_slope=tier_slope)
     model.update(names=names,trained_through=rows[-1]['date'])
     if as_of<=model['trained_through'] or as_of<SNAPSHOT_DATE:
         raise ValueError(f"预测日期需晚于数据截止日{model['trained_through']}且不早于积分快照{SNAPSHOT_DATE}")
@@ -209,7 +210,7 @@ def prepare(a,b,as_of,config,engine='tier',tier_width=TIER_WIDTH,tier_slope=TIER
         raw_p=float(expit(strength_row(x,rank_values)@np.array(w)-c*av))
         map_probs[m]=float(min(max(raw_p,RAIL),1-RAIL))
     profiles=build_profiles(a,b,as_of,model,rows,config['maps'])
-    provenance=dict(engine=engine,strength_version=STRENGTH_VERSION,
+    provenance=dict(engine=engine,strength_version=STRENGTH_VERSION,margin_method=model['margin_method'],
         strength=dict(weights=dict(zip(['hltv','valve','margin'],w)),avoidance_c=c,rail=RAIL,
                       tier=dict(width=tier_width,slope=tier_slope) if engine=='tier' else None,
                       tier_a={p:tiers[p].get(a,fallback[p]) for p in RATING_PROVIDERS} if engine=='tier' else None,
@@ -284,7 +285,8 @@ def main():
         + ('HLTV 与 Valve 分别分档，各取档差/5。' if args.engine=='tier'
            else 'HLTV 与 Valve 均取 log(1+积分) 之差。')
         + f"拟合权重：{provenance['strength']['weights']}；回避系数：{provenance['strength']['avoidance_c']:.4f}。"
-        + '逐图 logit 为两榜特征加权和 + 回合净胜残差项 − 回避项，再截断到[0.15,0.85]。',
+        + '逐图 logit 为两榜特征加权和 + 地图积分加权净胜项 − 回避项，再截断到[0.15,0.85]。'
+        + f'地图净胜按双方积分难度加权，以该队之后任意地图{MAP_HALF_LIFE_MATCHES}场为半衰期，不做样本量收缩；日期只用于历史顺序和排除未来赛果。',
         '偏好基于实际出场而非真实pick记录；ban考虑自身回避/对手常用/对阵风险，pick考虑自身常用/近期趋势/平滑胜率及强度模型对阵胜率。softmax只在剩余图中分配动作概率。',
         '双方首ban取原始地图池中"加权出场占比相对全局出图率最低"的图（先验不是均匀 1/7），并列则均分；该图若已被对手ban，则恢复原综合评分。若按全局出图率该图本该出场不足 2 次，则判为证据不足，改为在剩余图上均分。',
         first_ban_sentence(result['first_ban'],name_a,name_b),

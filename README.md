@@ -70,6 +70,8 @@ python scripts/major_sim.py --major data/major/singapore2026/stage1.txt data/maj
 ```powershell
 python scripts/test/test_bp.py
 python scripts/test/test_strength.py
+python scripts/test/test_margin.py
+python scripts/test/test_history_weights.py
 python scripts/test/test_major.py
 python scripts/evaluate.py
 ```
@@ -82,4 +84,12 @@ python scripts/evaluate.py
 - 搜索采用局部交换、随机重启与扰动，**不保证全局最优**；平均答对数最高也不等于通过率最高。
 - 模拟结果取决于胜率模型、赛制和 BP 假设。当前积分快照回填历史存在信息泄漏，BP 行为权重也未经真实 veto 数据校准。
 - 2026-11-19 已修正轮内 Buchholz 更新影响配对的问题。此前生成的 Major 报告应重新运行；增加模拟次数不能修复模型或规则错误。
-- 当前积分模型版本为 `dual-ranking-v1`。旧胜率缓存会自动避开，已有预测报告需重新生成；模型版本写入新 JSON。
+- 地图表现使用双方积分难度加权净胜，该队每打任意一张图，所有旧图记录权重乘约 0.965936（20 张任意图减半），不做 `+8` 收缩。训练权重和 BP 窗口也不再依赖日历间隔；日期只用于历史顺序和防止未来信息泄漏。当前模型版本为 `all-map-count-20-v5`；旧缓存会自动避开，已有报告需重新生成。
+
+对照此前逐图衰减与当前任意地图推进的衰减（需保留此前评估 JSON）：
+
+```powershell
+python scripts/evaluate.py --compare-history reports/evaluation/match_count_comparison.json --out reports/evaluation/all_map_count_comparison.json
+```
+
+现有对照报告是此前10张半衰期的历史测试，不代表当前20张版本的效果；20张版本已通过相关功能测试。详细结果见 [项目说明](doc/PROJECT.md#83-当前任意地图衰减模型对照)。

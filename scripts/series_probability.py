@@ -3,10 +3,10 @@
 算法（详细说明见 doc/PROJECT.md）：
   1) 队伍强度与地图差异分开建模：
          p_m = sigmoid( w_hltv*HLTV特征差 + w_valve*Valve特征差
-                        + w_margin*(A在m图的回合残差 − B在m图的回合残差) − c*(A回避−B回避) )
+                        + w_margin*(A在m图的积分加权净胜 − B在m图的积分加权净胜) − c*(A回避−B回避) )
      tier：两榜均分档；points：两榜均使用 log1p 分差。3 个权重 + 1 个回避系数。
-     唯一有验证价值的地图差异来源是 round_margin（回合净胜残差）；
-     dynamic_map / counterpick 等已证明无增益，不进入胜率。
+     round_margin 使用按积分难度加权、不收缩的回合净胜比例；
+     dynamic_map / counterpick 不进入最终胜率。
   2) 系列赛胜率 = 对"会被打到的地图集合"求和：
          P = Σ_set P(set) × P(best-of-k | set 的逐图 p)
      - 已知真实 veto 时：直接把 set 固定为该 3/5 张图。
@@ -25,7 +25,6 @@ import json
 import math
 import sys
 from collections import Counter, defaultdict
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -35,9 +34,12 @@ from scipy.special import expit
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from data_io import key, load_maps, load_rankings, ordinal  # noqa: E402
+from data_io import key, load_maps, load_rankings  # noqa: E402
 from map_preference_features import preference  # noqa: E402
 from features import avoidance, build_training_features, predict_features  # noqa: E402
+from rating_features import (RATING_PROVIDERS, TIER_DIV, TIER_SLOPE, TIER_WIDTH,  # noqa: E402
+                             build_tiers, tier_features)
+from history_weights import GLOBAL_RECENT_MAPS, RECENT_MAPS, series_weights  # noqa: E402
 
 CONFIG = ROOT / "configs/bp_rules.json"
 POOL = ["Ancient", "Anubis", "Cache", "Dust2", "Inferno", "Mirage", "Nuke"]
@@ -47,45 +49,11 @@ RAIL = 0.15
 
 
 # ---------------------------------------------------------------- 分档（tier）
-TIER_WIDTH = 80.0     # 档宽基数（积分）
-TIER_SLOPE = 0.06     # 档宽随积分增长的比例：宽度 = TIER_WIDTH + TIER_SLOPE * 积分
-TIER_DIV = 5.0        # 档差除以该值，仅用于数值缩放
-STRENGTH_VERSION = "dual-ranking-v1"
-RATING_PROVIDERS = ("hltv", "valve")
-
-
-def build_tiers(rankings, medians, width=TIER_WIDTH, slope=TIER_SLOPE):
-    """HLTV、Valve 各自按本榜最高分独立分档，缺榜用本榜中位数对应档位。"""
-    if not math.isfinite(width) or width <= 0 or not math.isfinite(slope) or slope < 0:
-        raise ValueError("档宽须为有限正数，档宽斜率须为有限非负数")
-    tiers, fallback = {}, {}
-    for provider in RATING_PROVIDERS:
-        pts = rankings[provider]
-        hi = max(pts.values())
-
-        def index(points):
-            steps, x = 0, float(points)
-            while x < hi:
-                x += width + slope * x
-                steps += 1
-            return steps
-
-        tiers[provider] = {t: index(p) for t, p in pts.items()}
-        fallback[provider] = index(medians[provider])
-    return tiers, fallback
-
-
-def tier_features(tiers, fallback):
-    """同时替换 HLTV、Valve 两列为各自的档差。"""
-    def ratings(r):
-        return tuple((tiers[p].get(r["a"], fallback[p])
-                      - tiers[p].get(r["b"], fallback[p])) / TIER_DIV
-                     for p in RATING_PROVIDERS)
-    return ratings
+STRENGTH_VERSION = "all-map-count-20-v5"
 
 
 def strength_row(x4, ratings=None):
-    """[HLTV 特征差, Valve 特征差, 回合残差]；默认前两列均为 log1p 分差。"""
+    """[HLTV 特征差, Valve 特征差, 地图加权净胜差]；前两列默认 log1p 分差。"""
     hltv, valve = ratings if ratings is not None else x4[:2]
     return np.array([hltv, valve, x4[6]])
 
@@ -97,10 +65,7 @@ def fit_strength(rows, ratings=None):
     scale = np.maximum(np.sqrt(np.mean(x * x, axis=0)), 1e-6)
     xn = x / scale
     y = np.array([r["y"] for r in rows])
-    cnt = Counter((r["date"], r["a"], r["b"]) for r in rows)
-    w = np.array([2 ** (-(ordinal(rows[-1]["date"]) - ordinal(r["date"])) / 30)
-                  / cnt[(r["date"], r["a"], r["b"])] for r in rows])
-    w = w / w.mean()
+    w = series_weights(rows)
     av = np.array([r["avoid"] for r in rows])
 
     def obj(th):
@@ -140,22 +105,15 @@ def binomial(p, n, target):
 
 
 # ---------------------------------------------------------------- profile（供规则 veto）
-MAP_RATE_DAYS = 90  # 计算"全局出图率"的回看窗口
-
-
-def global_map_rates(rows, as_of, pool, days=MAP_RATE_DAYS):
-    """七张图的全局出场占比，作为首ban的先验基线。
-
-    均匀 1/7 是错的：Anubis 近 90 天只占 9.4%、Dust2 占 18.3%。
-    用 1/7 会把"该图本来就少见"误当成"该队不打它"。
-    """
-    now = date.fromisoformat(as_of).toordinal()
+def global_map_rates(rows, as_of, pool, count=GLOBAL_RECENT_MAPS):
+    """最近 count 张历史地图的出图率；同日边界整批纳入，避免任意截断顺序。"""
     cnt = Counter()
-    n = 0
-    for r in rows:
-        if r["date"] < as_of and now - ordinal(r["date"]) <= days:
-            cnt[r["map"]] += 1
-            n += 1
+    past = sorted((r for r in rows if r['date'] < as_of), key=lambda r:r['date'])
+    cutoff = past[max(0,len(past)-count)]['date'] if past else as_of
+    selected = [r for r in past if r['date'] >= cutoff]
+    for r in selected:
+        cnt[r['map']] += 1
+    n = len(selected)
     if not n:
         return {m: 1.0 / len(pool) for m in pool}
     return {m: cnt[m] / n for m in pool}
@@ -164,17 +122,18 @@ def global_map_rates(rows, as_of, pool, days=MAP_RATE_DAYS):
 def build_profiles(a, b, as_of, model, rows, pool, rates=None):
     """双方七图的出场统计。额外带上"证据量"，供首ban规则判断是否采信。"""
     rates = rates or global_map_rates(rows, as_of, pool)
-    now = date.fromisoformat(as_of).toordinal()
     out = [{}, {}]
     for m in pool:
         for i, t in enumerate([a, b]):
             pref = preference(model["state"].get(t, dict(timeline=[]))["timeline"], m, as_of)
-            actual = [r for r in rows if r["map"] == m and t in (r["a"], r["b"])
-                      and r["date"] < as_of and now - ordinal(r["date"]) <= 30]
+            team_history = sorted((r for r in rows if t in (r['a'],r['b']) and r['date'] < as_of),
+                                  key=lambda r:r['date'])
+            cutoff = team_history[max(0,len(team_history)-RECENT_MAPS)]['date'] if team_history else as_of
+            actual = [r for r in team_history if r['date'] >= cutoff and r['map'] == m]
             wins = sum(r["y"] if t == r["a"] else 1 - r["y"] for r in actual)
             n = len(actual)
             out[i][m] = dict(preference=pref, avoidance=avoidance(pref),
-                             time_weighted_usage_probability=pref["decayed_share_unshrunk"],
+                             count_weighted_usage_probability=pref["decayed_share_unshrunk"],
                              usage=pref["recent_count"] / max(1, pref["recent_total"]),
                              recent_maps=n, recent_wins=wins,
                              raw_recent_win_rate=wins / n if n else None,
@@ -191,7 +150,8 @@ def predict_pair(team_a, team_b, as_of, pool=POOL, use_rule_veto=True, detail=Fa
                  tier_width=TIER_WIDTH, tier_slope=TIER_SLOPE):
     obs, names, manifest, raw, quarantine = load_maps()
     rankings, medians, _ = load_rankings()
-    rows, current = build_training_features(obs, rankings, medians)
+    rows, current = build_training_features(obs, rankings, medians, engine=engine,
+                                           tier_width=tier_width, tier_slope=tier_slope)
     current.update(names=names, trained_through=rows[-1]["date"])
     a, b = key(team_a), key(team_b)
     if a == b:
@@ -224,6 +184,7 @@ def predict_pair(team_a, team_b, as_of, pool=POOL, use_rule_veto=True, detail=Fa
 
     result = dict(team_a=known[a], team_b=known[b], as_of=as_of,
                   strength_model=dict(engine=engine, version=STRENGTH_VERSION,
+                                      margin_method=current['margin_method'],
                                       weights=dict(zip(["hltv", "valve", "margin"], w)),
                                       avoidance_c=c,
                                       tier=dict(width=tier_width, slope=tier_slope)
