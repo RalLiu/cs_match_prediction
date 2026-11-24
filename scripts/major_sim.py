@@ -13,10 +13,9 @@
   * 阶段 2/3：直邀 8 队为种子 1-8（按赛前全球 VRS 序）；上一阶段晋级 8 队为种子 9-16
     （按上一阶段的最终种子序）。
 
-游戏内 Pick'Em（Cologne 2026 Major Hub 起，新加坡 2026 沿用）：
+游戏内 Pick'Em（通过线按用户游戏内核实结果）：
   * 每阶段 10 格：2 个 3-0、6 个 3-1 或 3-2 晋级、2 个 0-3。
-  * 答对 **6 个（十中六）** 才算通过本阶段，纪念币升一级（青铜→白银→黄金→钻石，每级 300 tokens）。
-    六格晋级若答对 5 个也不能单独救回一个错格——按总答对数算。
+  * 十格总计答对 **至少 5 个（十中五）** 即通过本阶段。
   * 槽位不能串用：把 3-0 队填进晋级格，该格不得分；反之亦然。
   * 16 队五轮瑞士轮的结果分布恒定：2 个 3-0、3 个 3-1、3 个 3-2、3 个 2-3、
     3 个 1-3、2 个 0-3。所以 3-0 与 0-3 各只有 2 个正确答案，10 格的理论上限因此很低。
@@ -1061,7 +1060,7 @@ def main() -> None:
         epilog="示例：\n"
                "  python scripts/major_sim.py --init\n"
                "  python scripts/major_sim.py --stage data/major/singapore2026/stage1.txt\n"
-               "  python scripts/major_sim.py --stage stage1.txt --sims 400000 --threshold 6,7\n")
+               "  python scripts/major_sim.py --stage stage1.txt --sims 400000 --threshold 5,6\n")
     ap.add_argument("--stage", type=Path, help="种子表：每行一队，从高到低，共 16 行")
     ap.add_argument("--major", nargs=3, type=Path, metavar=("S1", "S2", "S3"),
                     help="整届：三张种子表；Stage 2/3 可只写 8 支直邀，9-16 号自动补齐")
@@ -1069,7 +1068,7 @@ def main() -> None:
     ap.add_argument("--sims", type=int, default=120000, help="蒙特卡洛次数，默认 120000")
     ap.add_argument("--all-bo3", action="store_true",
                     help="全 BO3：--stage 时作用于当前阶段；--major 时仅作用于 Stage 3")
-    ap.add_argument("--threshold", default="6", help="通过线（答对几个算过），默认 6，即十中六")
+    ap.add_argument("--threshold", default="5", help="通过线（答对几个算过），默认 5，即十中五")
     ap.add_argument("--as-of", default="2026-11-24", help="预测日期，默认 2026-11-24（Major 开赛日）")
     ap.add_argument("--engine", choices=["tier", "points"], default="tier",
                     help="tier=两榜均分档；points=两榜均取 log1p 分差")

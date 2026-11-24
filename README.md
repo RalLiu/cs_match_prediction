@@ -41,7 +41,7 @@ python scripts/series_probability.py FURIA Falcons --maps Ancient,Dust2,Mirage -
 python scripts/major_sim.py --stage data/major/singapore2026/stage1.txt
 ```
 
-默认模拟 120,000 次，搜索使“10 格至少答对 6 格”概率较高的填法。增加次数或同时比较五中线、六中线：
+默认模拟 120,000 次，搜索使“10 格至少答对 5 格”概率较高的填法。增加次数或同时比较至少答对 5 / 6 格：
 
 ```powershell
 python scripts/major_sim.py --stage data/major/singapore2026/stage1.txt --sims 400000 --threshold 5,6
